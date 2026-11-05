@@ -16,8 +16,13 @@ let renderedKey = "";
 
 // ---------------------------------------------------------------- form
 async function init() {
+  // The SCAD source is also the form's schema: assignments give each
+  // parameter's name and default; comments give labels, groups, and allowed values.
   const src = await (await fetch("Wheel.scad", { cache: "no-cache" })).text();
   params = parseScadParams(src);
+
+  // A shared URL can restore any parameter. Missing values use the default;
+  // supplied ones are validated or clamped by cleanValue().
   const q = new URLSearchParams(location.search);
   for (const p of params) values[p.name] = q.has(p.name) ? cleanValue(p, q.get(p.name)) : p.default;
   buildForm();
@@ -25,6 +30,8 @@ async function init() {
 }
 
 function buildForm() {
+  // Rebuild the form from the parsed parameter list, starting a new fieldset
+  // whenever the parameter's group changes.
   const form = $("form");
   form.innerHTML = "";
   let fs = null, group = null;
@@ -32,7 +39,7 @@ function buildForm() {
     if (p.group !== group) {
       group = p.group;
       fs = document.createElement("fieldset");
-      fs.innerHTML = `<legend>${group}</legend>`;
+      fs.innerHTML = `<legend>${escapeHtml(group)}</legend>`;
       form.append(fs);
     }
     fs.append(makeControl(p));
@@ -40,6 +47,8 @@ function buildForm() {
 }
 
 function makeControl(p) {
+  // Pick a control that matches the parameter type, then send all edits
+  // through setValue() so values and the shareable URL stay in sync.
   const row = document.createElement("div");
   row.className = "row";
   const id = "p_" + p.name;
@@ -57,10 +66,11 @@ function makeControl(p) {
     row.innerHTML = `${label}<select id="${id}">${opts}</select>`;
     row.querySelector("select").onchange = (e) => setValue(p, e.target.value);
   } else if (p.kind === "number" && p.min !== undefined) {
+    // Bounded numeric parameters get both a precise input and a slider.
     const attrs = `min="${p.min}" max="${p.max}" step="${p.step}" value="${v}"`;
     row.innerHTML = `${label}<input type="number" id="${id}" ${attrs}><input type="range" ${attrs} aria-label="${escapeHtml(p.label)}">`;
     const [num, range] = row.querySelectorAll("input");
-    range.oninput = () => { num.value = range.value; setValue(p, range.value, false); };
+    range.oninput = () => { num.value = range.value; setValue(p, range.value); };
     num.onchange = () => { setValue(p, num.value); num.value = values[p.name]; range.value = values[p.name]; };
   } else {
     row.innerHTML = `${label}<input type="${p.kind === "number" ? "number" : "text"}" id="${id}" value="${escapeHtml(String(v))}">`;
@@ -71,18 +81,24 @@ function makeControl(p) {
 
 function setValue(p, raw) {
   values[p.name] = cleanValue(p, raw);
-  // Keep the URL shareable: only non-default values go in the query string
+  // Keep the URL compact and shareable by storing only non-default values.
   const q = new URLSearchParams();
   for (const x of params) if (values[x.name] !== x.default) q.set(x.name, values[x.name]);
   history.replaceState(null, "", q.toString() ? "?" + q : location.pathname);
-  $("stale").style.display = renderedKey && renderedKey !== currentKey() ? "block" : "none";
+  updateStale();
 }
 
 const currentKey = () => JSON.stringify(values);
 
+function updateStale() {
+  $("stale").style.display = renderedKey && renderedKey !== currentKey() ? "block" : "none";
+}
+
 // ---------------------------------------------------------------- render
 function getWorker() {
   if (!worker) {
+    // Reuse the worker between renders; it runs the expensive SCAD conversion
+    // away from the UI thread.
     worker = new Worker("worker.js", { type: "module" });
     worker.onmessage = onWorkerMessage;
     worker.onerror = (e) => fail(`Worker failed to start: ${e.message || "check the browser console"}`, []);
@@ -91,8 +107,10 @@ function getWorker() {
 }
 
 function generate() {
+  // Each run gets a unique ID so responses from older runs can be ignored.
   const id = ++renderId;
   const part = values.part;
+  // "wheel" is a convenience selection that asks the worker for every part.
   const parts = part === "wheel" ? ["hub", "rim", "spokes"] : [part];
   results = {};
   clearModel();
@@ -108,9 +126,12 @@ function generate() {
 }
 
 function onWorkerMessage({ data: m }) {
-  if (m.type === "status") { $("status").textContent = m.text; return; }
-  if (m.id !== renderId) return;                       // stale message from a cancelled run
-  if (m.type === "part") {
+  // Ignore late messages after cancellation or after a newer render started.
+  if (m.id !== renderId) return;
+  if (m.type === "status") {
+    $("status").textContent = m.text;
+  } else if (m.type === "part") {
+    // Keep each binary STL for downloads and add it to the live preview.
     results[m.part] = m.stl;
     generate.logs.push(...m.log);
     addMesh(m.part, m.stl);
@@ -127,6 +148,7 @@ function onWorkerMessage({ data: m }) {
 }
 
 function fail(message, log) {
+  // Make a common OpenSCAD missing-file error actionable for the user.
   const missing = message.match(/Can't open (?:import )?file ['"]\/?([^'"]+)['"]/i);
   if (missing) message = `Missing file: ${missing[1]}. Put it in the assets/ folder, or change the option that uses it.`;
   setBusy(false);
@@ -136,7 +158,9 @@ function fail(message, log) {
 }
 
 function cancel() {
-  if (worker) { worker.terminate(); worker = null; }   // next Generate starts a fresh worker
+  // Terminating the worker stops its current job; the next render creates a
+  // fresh one. Bump the ID so any already-queued response is considered stale.
+  if (worker) { worker.terminate(); worker = null; }
   renderId++;
   setBusy(false);
   $("status").textContent = "Cancelled";
@@ -152,6 +176,8 @@ function showResults(log, error) {
   const echo = {};
   const warnings = new Set();
   for (const line of log) {
+    // OpenSCAD emits computed values and warnings as log lines; collect them
+    // for the structured results area and suppress duplicate warnings.
     const m = line.match(/^ECHO: "(\w+)=([-\d.]+)"/);
     if (m) echo[m[1]] = parseFloat(m[2]);
     const w = line.match(/^ECHO: "WARNING: (.*)"$/);
@@ -162,6 +188,7 @@ function showResults(log, error) {
 
   let html = "";
   if ("SPOKE_LENGTH_NDS" in echo) {
+    // Lengths are reported only when the model emits the corresponding echoes.
     const f = (x) => x.toFixed(1) + " mm";
     html += `<h2>Spoke lengths</h2>
       <table>
@@ -178,6 +205,8 @@ function showResults(log, error) {
 }
 
 function showDownloads() {
+  // Offer a combined file for a complete wheel, plus individual files for
+  // each generated part. A single-part render only needs one download button.
   const box = $("downloads");
   box.innerHTML = "";
   const parts = Object.keys(results);
@@ -198,6 +227,7 @@ function showDownloads() {
 }
 
 function fileBase() {
+  // Include key wheel specs in the filename to distinguish exports.
   const v = values;
   return `wheel-${v.spoke_count}h-${v.num_crosses}x-erd${v.erd}-${v.hub_type}`;
 }
@@ -216,6 +246,8 @@ function mergeStl(buffers) {
 }
 
 function download(buf, name) {
+  // The object URL lets the browser download in-memory data without a server
+  // round trip; revoke it later to release the associated browser resources.
   const url = URL.createObjectURL(new Blob([buf], { type: "model/stl" }));
   const a = Object.assign(document.createElement("a"), { href: url, download: name });
   document.body.append(a); a.click(); a.remove();
@@ -227,6 +259,7 @@ let scene, camera, renderer, controls, modelGroup;
 const loader = new STLLoader();
 
 function setupViewer() {
+  // Create the Three.js scene once; subsequent renders replace only its meshes.
   const host = $("viewer");
   scene = new THREE.Scene();
   camera = new THREE.PerspectiveCamera(35, 1, 1, 10000);
@@ -248,6 +281,7 @@ function setupViewer() {
   scene.add(modelGroup);
 
   new ResizeObserver(() => {
+    // Keep the drawing buffer and camera projection matched to the viewer box.
     const { clientWidth: w, clientHeight: h } = host;
     renderer.setSize(w, h, false);
     camera.aspect = w / h;
@@ -258,10 +292,13 @@ function setupViewer() {
 }
 
 function clearModel() {
+  // Dispose GPU-backed resources as well as removing meshes to avoid leaks
+  // when the user generates several models in one page session.
   for (const m of [...modelGroup.children]) { m.geometry.dispose(); m.material.dispose(); modelGroup.remove(m); }
 }
 
 function addMesh(part, buf) {
+  // Parse the worker's STL bytes into geometry and style it by wheel part.
   const geom = loader.parse(buf);
   geom.computeVertexNormals();
   const mat = new THREE.MeshStandardMaterial({
@@ -272,6 +309,7 @@ function addMesh(part, buf) {
 }
 
 function frame() {
+  // Fit the camera to the current model while preserving its viewing direction.
   const box = new THREE.Box3().setFromObject(modelGroup);
   if (box.isEmpty()) return;
   const sphere = box.getBoundingSphere(new THREE.Sphere());
@@ -285,17 +323,24 @@ function frame() {
 
 // ---------------------------------------------------------------- misc
 function escapeHtml(s) {
+  // Parameter metadata and model logs may contain HTML special characters,
+  // so escape any such text before inserting it into markup.
   return s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
 
 $("generate").onclick = generate;
 $("cancel").onclick = cancel;
 $("reset").onclick = () => {
+  // Restore defaults, remove query overrides, and recreate controls to reflect
+  // the reset values in every input.
   for (const p of params) values[p.name] = p.default;
   history.replaceState(null, "", location.pathname);
   buildForm();
+  updateStale();
 };
 $("share").onclick = async () => {
+  // Prefer the clipboard API; the prompt fallback supports browsers or
+  // contexts where clipboard permission is unavailable.
   try { await navigator.clipboard.writeText(location.href); $("status").textContent = "Link copied"; }
   catch { prompt("Copy this link:", location.href); }
 };

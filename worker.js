@@ -2,7 +2,7 @@
 // never freezes during a render.
 //
 // Message in:  { type: "render", id, parts: ["hub","rim","spokes"], defines: ["-D","k=v",...] }
-// Messages out: { type: "status", text }
+// Messages out: { type: "status", id, text }
 //               { type: "part", id, part, stl (ArrayBuffer), log, ms }
 //               { type: "done", id, log }
 //               { type: "error", id, message, log }
@@ -87,7 +87,7 @@ self.onmessage = async (ev) => {
   let lastLog = [];
   try {
     if (!filesPromise) {
-      self.postMessage({ type: "status", text: "Loading OpenSCAD and model files…" });
+      self.postMessage({ type: "status", id, text: "Loading OpenSCAD and model files…" });
       filesPromise = loadFiles();
     }
     let files;
@@ -95,7 +95,7 @@ self.onmessage = async (ev) => {
 
     for (let i = 0; i < parts.length; i++) {
       const part = parts[i];
-      self.postMessage({ type: "status", text: `Rendering ${part} (${i + 1}/${parts.length})…` });
+      self.postMessage({ type: "status", id, text: `Rendering ${part} (${i + 1}/${parts.length})…` });
       const r = await renderPart(files, part, defines);
       lastLog = r.log;
       self.postMessage({ type: "part", id, part, stl: r.stl, log: r.log, ms: r.ms }, [r.stl]);
